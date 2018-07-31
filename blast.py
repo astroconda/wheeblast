@@ -4,13 +4,16 @@ import os
 import yaml
 import subprocess
 import sys
+from glob import glob
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version, InvalidVersion
 
 
 USER_CONFIG = os.path.expanduser('~/.blast/config.yaml')
 USER_CONFIG_EXISTS = os.path.exists(USER_CONFIG)
+VERSION_BAD_PATTERNS = ['release_', '_release', 'release-', '-release']
 SPECIFIERS = ['~', '!', '<', '>', '=']
+
 
 @contextlib.contextmanager
 def use_directory(path):
@@ -30,7 +33,8 @@ class PyEnv:
 
     def _cmd(self, *args, **kwargs):
         if not args:
-            raise ValueError('Expecting arguments to pass to pyenv. Got nothing.')
+            raise ValueError('Expecting arguments to pass to pyenv. '
+                             'Got nothing.')
 
         command = []
         proc = None
@@ -54,7 +58,9 @@ class PyEnv:
             command = ' '.join(command)  # convert to string
 
         try:
-            proc = subprocess.run(command, env=env, shell=shell, stdout=stdout, stderr=stderr, check=True, encoding='utf-8')
+            proc = subprocess.run(command, env=env, shell=shell,
+                                  stdout=stdout, stderr=stderr,
+                                  check=True, encoding='utf-8')
         except subprocess.CalledProcessError as cpe:
             if cpe.returncode:
                 print('Command (exit {}): {}'.format(cpe.returncode, command))
@@ -68,25 +74,28 @@ class PyEnv:
 
     def create(self):
         if os.environ.get('PYENV_ROOT'):
-            if not os.path.exists(os.path.join(os.environ['PYENV_ROOT'], 'versions', self.version)):
-                proc_inst = self._cmd('install', '-s', self.version, override=True)
+            if not os.path.exists(os.path.join(os.environ['PYENV_ROOT'],
+                                               'versions', self.version)):
+                proc_inst = self._cmd('install', '-s',
+                                      self.version, override=True)
                 if proc_inst.stderr:
-                    if not 'already' in proc_inst.stderr:
+                    if 'already' not in proc_inst.stderr:
                         print(proc_inst.stderr)
                         exit(1)
 
-            if not os.path.exists(os.path.join(os.environ['PYENV_ROOT'], 'versions', self.venv)):
-                proc_venv = self._cmd('virtualenv', self.version, self.venv, override=True)
+            if not os.path.exists(os.path.join(os.environ['PYENV_ROOT'],
+                                               'versions', self.venv)):
+                self._cmd('virtualenv', self.version, self.venv, override=True)
         else:
             raise RuntimeError('PYENV_ROOT is not defined.')
             exit(1)
-
 
     def activate(self):
         env = {}
         command = 'eval "$(pyenv init -)" ' \
                   '&& eval "$(pyenv virtualenv-init -)" ' \
-                  '&& pyenv activate "{}" && pyenv rehash && printenv'.format(self.venv)
+                  '&& pyenv activate "{}" ' \
+                  '&& pyenv rehash && printenv'.format(self.venv)
 
         proc = self._cmd(command,
                          shell=True, redirect=True)
@@ -101,15 +110,22 @@ class PyEnv:
 
 
 class Git:
-    def __init__(self, uri):
+    def __init__(self, uri, root='.'):
         self.uri = uri
-        self.base = os.path.abspath(os.path.basename(self.uri).replace('.git', ''))
-        self.basepath = self.base
+        self.root = os.path.abspath(root)
+
+        if not os.path.exists(self.root):
+            print('Making {}'.format(self.root))
+            os.makedirs(self.root)
+
+        self.base = os.path.basename(self.uri).replace('.git', '')
+        self.basepath = os.path.abspath(os.path.join(self.root, self.base))
         self._tags = []
 
     def _cmd(self, *args, **kwargs):
         if not args:
-            raise ValueError('Expecting arguments to pass to Git. Got nothing.')
+            raise ValueError('Expecting arguments to pass to Git. '
+                             'Got nothing.')
 
         command = ['git']
         proc = None
@@ -118,7 +134,9 @@ class Git:
             command.append(arg)
 
         try:
-            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, encoding='utf-8')
+            proc = subprocess.run(command, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, check=True,
+                                  encoding='utf-8')
         except subprocess.CalledProcessError as cpe:
             print('Command (exit {}): {}'.format(cpe.returncode, command))
             print(cpe.stderr.strip())
@@ -136,7 +154,9 @@ class Git:
         if os.path.exists(self.basepath):
             return self.basepath
 
-        self._cmd('clone', self.uri)
+        with use_directory(self.root):
+            self._cmd('clone', self.uri)
+
         return self.basepath
 
     def fetch(self, *args, **kwargs):
@@ -180,7 +200,6 @@ class Git:
 
 
 def setuptools_inject():
-    print("Injecting setuptools...")
     with open('setup.py', 'r') as script:
         orig = script.read().splitlines()
 
@@ -189,6 +208,15 @@ def setuptools_inject():
     with open('setup.py', 'w+') as script:
         new = '\n'.join(orig)
         script.write(new)
+
+
+def normalize_tag(tag, bad_patterns):
+    # Normalize non-standard tagging conventions
+    if bad_patterns is not None:
+        for pattern in bad_patterns:
+            tag = tag.replace(pattern, '')
+
+    return tag
 
 
 def eval_specifier(spec, tag, bad_patterns=None):
@@ -204,11 +232,7 @@ def eval_specifier(spec, tag, bad_patterns=None):
         spec = '==' + spec
 
     spec = SpecifierSet(spec)
-
-    # Normalize non-standard tagging conventions
-    if bad_patterns is not None:
-        for pattern in bad_patterns:
-            tag = tag.replace(pattern, '')
+    tag = normalize_tag(tag)
 
     try:
         tag = Version(tag)
@@ -217,6 +241,24 @@ def eval_specifier(spec, tag, bad_patterns=None):
         tag = ''
 
     return tag in spec
+
+
+def dist_exists(root, mode, bad_patterns, *hints):
+    ext = ''
+    if mode == 'sdist':
+        ext = '.tar.gz'
+    elif mode == 'bdist_wheel':
+        ext = '.whl'
+    else:
+        raise NotImplementedError('Mode "{}" is not implemented.'.format(mode))
+
+    pattern = normalize_tag('*'.join(hints), bad_patterns) + '*' + ext
+    paths = glob(os.path.join(root, pattern))
+
+    if paths:
+        return True
+
+    return False
 
 
 if __name__ == '__main__':
@@ -240,54 +282,56 @@ if __name__ == '__main__':
         requires:
             - wheel
 
-        version_latest: true
+        #version_latest: true
 
         version_bad_patterns:
             - 'release_'
             - '_release'
             - 'release-'
             - '-release'
+            - 'v'
+            - 'V'
 
     projects:
-        #acstools:
-        #    requires:
-        #        - relic
+        acstools:
+            requires:
+                - relic
 
-        #asdf:
-        #    requires: null
+        asdf:
+            requires: null
 
-        #calcos:
-        #    requires: null
+        calcos:
+            requires: null
 
-        #costools:
-        #    requires: null
+        costools:
+            requires: null
 
-        #crds:
-        #    requires:
-        #        - astropy
-        #        - numpy
-        #        - requests
-        #    setuptools_inject: true
+        crds:
+            requires:
+                - astropy
+                - numpy
+                - requests
+            setuptools_inject: true
 
-        #drizzle:
-        #    requires: null
+        drizzle:
+            requires: null
 
-        #drizzlepac:
-        #    requires:
-        #        - astropy
-        #        - numpy
+        drizzlepac:
+            requires:
+                - astropy
+                - numpy
 
-        #fitsblender:
-        #    requires: null
+        fitsblender:
+            requires: null
 
-        #imexam:
-        #    requires: null
+        imexam:
+            requires: null
 
-        #nictools:
-        #    requires: null
+        nictools:
+            requires: null
 
-        #pysynphot:
-        #    requires: null
+        pysynphot:
+            requires: null
 
         reftools:
             requires: null
@@ -344,9 +388,13 @@ if __name__ == '__main__':
             requires: null
     """)
 
-    upload_dir = os.path.abspath(os.path.join(os.curdir, 'upload'))
-    if not os.path.exists(upload_dir):
-        os.mkdir(upload_dir)
+    output_dir = os.path.abspath(os.path.join(os.curdir, 'upload'))
+
+    if config.get('output_dir'):
+        output_dir = os.path.abspath(config['output_dir'])
+
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
 
     # Begin aliveness checks before we get too far
     check_keys = ['global', 'host', 'organization', 'projects']
@@ -364,7 +412,6 @@ if __name__ == '__main__':
 
     # Check structure of project dictionaries
     for project, info in config['projects'].items():
-        print(project, info)
         if info is None and not info.get('requires'):
             print('Error: {}: Missing `requires` list'.format(project), file=sys.stderr)
             failed_requires = True
@@ -375,7 +422,7 @@ if __name__ == '__main__':
     # Perform matrix tasks
     for project, info in config['projects'].items():
         url = '/'.join([config['host'], config['organization'], project])
-        repo = Git(url)
+        repo = Git(url, root='src')
 
         print('Repository: {}'.format(url))
         print('Source directory: {}'.format(repo.basepath))
@@ -397,13 +444,13 @@ if __name__ == '__main__':
                 pyenv.activate()
 
                 # Upgrade PIP
-                pyenv.run('pip', 'install', '--upgrade', 'pip', redirect=True)
+                pyenv.run('pip', 'install', '-q', '--upgrade', 'pip', redirect=True)
 
                 # Generic setup
                 if config.get('global'):
                     if config['global'].get('requires'):
                         for pkg in config['global']['requires']:
-                            pyenv.run('pip', 'install', pkg, redirect=True)
+                            pyenv.run('pip', 'install', '-q', pkg, redirect=True)
 
                     if config['global'].get('version_latest'):
                         repo.reset('--hard')
@@ -415,15 +462,15 @@ if __name__ == '__main__':
 
                 if info.get('requires'):
                     for pkg in info['requires']:
-                        pyenv.run('pip', 'install', pkg)
+                        pyenv.run('pip', 'install', '-q', pkg)
 
                 for tag in tags:
+                    sanitize = VERSION_BAD_PATTERNS
                     if info.get('build_versions'):
                         spec = info['build_versions']
-                        sanitize = None
 
                         if config['global'].get('version_bad_patterns'):
-                            sanitize = config['global']['version_bad_patterns']
+                            sanitize += config['global']['version_bad_patterns']
 
                         if info.get('version_bad_patterns'):
                             sanitize += info['version_bad_patterns']
@@ -438,15 +485,22 @@ if __name__ == '__main__':
                     repo.checkout(tag)
 
                     if info.get('setuptools_inject', False):
+                        print('===> Overriding distutils with setuptools')
                         setuptools_inject()
 
-                    for build_command in ['sdist', 'bdist_egg', 'bdist_wheel']:
+                    for build_command, build_args in [('sdist', []),
+                                                      ('bdist_wheel', [])]:
                         print('===> {}::{}: {}: '.format(project, tag, build_command), end='')
-                        proc = pyenv.run('python', 'setup.py', build_command, '-d', upload_dir, redirect=True)
-                        if proc.stderr and proc.returncode:
-                            print("FAILED")
-                            print('#{}'.format('!' * 78))
-                            print(proc.stderr)
-                            print('#{}'.format('!' * 78))
+                        if not dist_exists(output_dir, build_command, sanitize, project, tag):
+                            proc = pyenv.run('python', 'setup.py',
+                                             build_command, '-d', output_dir,
+                                             *build_args, redirect=True)
+                            if proc.stderr and proc.returncode:
+                                print("FAILED")
+                                print('#{}'.format('!' * 78))
+                                print(proc.stderr)
+                                print('#{}'.format('!' * 78))
+                            elif not proc.returncode:
+                                print("SUCCESS")
                         else:
-                            print("SUCCESS")
+                            print("EXISTS")
