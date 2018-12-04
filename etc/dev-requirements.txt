@@ -1,0 +1,7 @@
+numpy
+astropy
+cython
+relic
+wheel
+#d2to1
+#stsci.distutils

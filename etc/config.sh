@@ -1,0 +1,57 @@
+tag_limit=1
+tag_regex='^\d+\.\d+?\.?\d+$'
+docker_image=quay.io/pypa/manylinux1_x86_64
+envs=(
+   cp37-cp37m
+   cp36-cp36m
+)
+host=https://github.com
+org=spacetelescope
+projects=(
+    acstools
+    asdf
+    astroimtools
+    calcos
+    costools
+    crds
+    cubeviz
+    d2to1
+    drizzle
+    drizzlepac
+    fitsblender
+    gwcs
+    imexam
+    mirage
+    mosviz
+    nictools
+    pandokia
+    photutils
+    poppy
+    pysynphot
+    reftools
+    refstis
+    relic
+    specviz
+    spherical_geometry
+    stginga
+    stistools
+    stsci.convolve
+    stsci.distutils
+    stsci.image
+    stsci.imagemanip
+    stsci.imagestats
+    stsci.ndimage
+    stsci.numdisplay
+    stsci.stimage
+    stsci.skypac
+    stsci.tools
+    stregion
+    stsynphot
+    stwcs
+    synphot_refactor
+    verhawk
+    webbpsf
+    wfpc2tools
+    wfc3tools
+    wss_tools
+)
